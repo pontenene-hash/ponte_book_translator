@@ -76,3 +76,9 @@
 - 一括補正→採用→PDF・プロンプト作成の画面操作を確認。
 - 既存機能も含め自動テスト17件成功。
 - ChatGPTへの送信・翻訳・最終的な対訳PDF作成は、このアプリの自動実行範囲には含みません。
+
+## v2.0 検証
+- 19 tests passed: legacy tests + rotation/restore, optional orientation fallback, new review/reorder/export flow and stale output invalidation.
+- Canvas component protocol and vertical drag behavior checked with a JavaScript DOM mock.
+- Browser installation failed in this environment. Actual browser/touch rendering and iPhone/Windows operation are not verified.
+- Tesseract orientation is confidence-gated; always visually confirm.

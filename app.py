@@ -72,6 +72,13 @@ def run_translation(page,provider,key,model,glossary,instructions):
     save()
 
 with st.sidebar:
+    advanced=st.toggle('従来の翻訳・編集画面を使う',value=False,key='advanced_mode')
+if not advanced:
+    from simple_app import render
+    render(p,save,replace_project)
+    st.stop()
+
+with st.sidebar:
     st.markdown('### 📖 PONTE\n洋書翻訳ノート')
     st.caption('v1.3.1 ・ PDF＋プロンプト出力対応')
     step=st.radio('作業メニュー',['1　資料を追加','一括補正・画像出力','写真の補正（無料）','2　翻訳・確認','3　用語辞書','4　出力'],label_visibility='collapsed',key='work_menu')
