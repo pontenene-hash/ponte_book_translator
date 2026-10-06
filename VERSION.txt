@@ -1,0 +1,3 @@
+PONTE Book Translator v1.3.1
+2026-10-06
+補正済みPDFと専用プロンプトTXTを同時作成。2点セットZIP出力に対応。
