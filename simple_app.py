@@ -30,7 +30,7 @@ def render(project,save,replace_project):
     for pending,target in [('pending_step','simple_step'),('pending_page','simple_page')]:
         if pending in st.session_state:st.session_state[target]=st.session_state.pop(pending)
     st.title('写真を整えて、ChatGPTへ')
-    st.caption('v2.0 ・ 補正と出力は無料・APIキー不要')
+    st.caption('v2.0.1 ・ 補正と出力は無料・APIキー不要')
     st.radio('作業の順番',STEPS,horizontal=True,key='simple_step')
     step=st.session_state.simple_step
     pages=project['pages']
@@ -127,7 +127,12 @@ def render(project,save,replace_project):
             st.rerun()
         st.button('保存画面へ →',on_click=go,args=(2,),use_container_width=True)
         return
+    def back_buttons(position):
+        st.button('← 補正画面に戻る',key='back_review_'+position,on_click=go,args=(1,),use_container_width=True)
+        st.button('＋ 写真を追加する',key='back_upload_'+position,on_click=go,args=(0,),use_container_width=True)
     st.subheader('ChatGPTに渡すファイルを保存')
+    back_buttons('top')
+    st.caption('戻っても写真・補正内容は保持されます。保存したファイルのプレビューを開いている場合は、先にプレビューを閉じてください。')
     if any(not p.get('photo_reviewed') for p in pages):
         st.warning('未確認の写真があります。文字の向き・湾曲・端の欠けを確認してください。')
         st.button('未確認の写真を見る',on_click=lambda:(move(next(i for i,p in enumerate(pages) if not p.get('photo_reviewed'))),go(1)),use_container_width=True)
@@ -147,3 +152,5 @@ def render(project,save,replace_project):
             st.download_button('PDF＋依頼文のZIP',result['bundle'],'ChatGPT_handoff.zip',on_click='ignore')
             st.download_button('写真のZIP',result['images'],'corrected_images.zip',on_click='ignore')
             st.caption('PDFの画像を読めない場合は、写真のZIPを展開してJPGをChatGPTへ添付してください。')
+        st.divider()
+        back_buttons('bottom')

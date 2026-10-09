@@ -1,2 +1,2 @@
-PONTE Photo Preparation v2.0
-3-step workflow, local orientation, touch curve editor
+PONTE Photo Preparation v2.0.1
+Return buttons on export screen; preserves corrected photos
