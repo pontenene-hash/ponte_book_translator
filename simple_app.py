@@ -1,5 +1,5 @@
 """Three-step photo preparation UI. Translation happens in ChatGPT."""
-import base64,hashlib,io
+import base64,hashlib,io,json
 from pathlib import Path
 import streamlit as st
 import streamlit.components.v1 as components
@@ -11,6 +11,56 @@ from handoff import handoff_files
 
 editor=components.declare_component('ponte_photo_points',path=str(Path(__file__).parent/'curve_editor'))
 STEPS=['① 写真を入れる','② 補正を確認','③ ChatGPT用に保存']
+
+def save_html(data,filename,mime):
+    """Share a local File, or download in a separate tab; never navigate the app."""
+    payload=json.dumps({'data':base64.b64encode(data).decode(),'name':filename,'mime':mime},ensure_ascii=True).replace('<','\\u003c')
+    return '''<!doctype html><html lang="ja"><meta charset="utf-8">
+<style>body{font:16px system-ui;margin:0;color:#214d47}button,a{box-sizing:border-box;display:block;width:100%;padding:14px;border:1px solid #b8c8bd;border-radius:10px;background:#fff;color:#214d47;text-align:center;font:inherit;text-decoration:none;margin:8px 0;cursor:pointer}button:disabled{opacity:.5}p{font-size:14px;line-height:1.6;margin:8px 0}#share{background:#214d47;color:white} [hidden]{display:none!important}</style>
+<button id="share" disabled>保存の準備中…</button>
+<a id="download" hidden target="_blank" rel="noopener noreferrer">別タブで保存する</a>
+<p id="status" role="status" aria-live="polite">準備が終わるまでお待ちください。</p>
+<script>
+const payload='''+payload+''';
+const share=document.getElementById('share'), link=document.getElementById('download'), status=document.getElementById('status');
+let file, url;
+try {
+  // Decode in blocks to avoid a second whole-file binary string for large ZIPs.
+  const chunks=[];
+  for(let i=0;i<payload.data.length;i+=1048576){
+    const raw=atob(payload.data.slice(i,i+1048576));
+    const bytes=new Uint8Array(raw.length);
+    for(let j=0;j<raw.length;j++) bytes[j]=raw.charCodeAt(j);
+    chunks.push(bytes);
+  }
+  file=new File(chunks,payload.name,{type:payload.mime});
+  payload.data='';
+  url=URL.createObjectURL(file);link.href=url;link.download=payload.name;
+  let supported=false;
+  try { supported=!!(navigator.share && navigator.canShare && navigator.canShare({files:[file]})); } catch (_) {}
+  share.hidden=!supported;share.disabled=false;link.hidden=false;
+  share.textContent='共有メニューから保存';
+  status.textContent=supported?'上のボタンを押し「ファイルに保存」を選んでください。キャンセルしてもアプリに戻れます。':'この環境では共有保存を使えません。Safariで開き、下の説明を確認して別タブで保存してください。';
+} catch (_) {
+  share.hidden=true;
+  status.textContent='保存の準備に失敗しました。写真を少なくして作り直すか、パソコンで開いてください。';
+}
+share.addEventListener('click',async()=>{
+  share.disabled=true;
+  try {
+    // Invoke directly in the user's click, before any asynchronous work.
+    await navigator.share({files:[file]});
+    status.textContent='共有画面を閉じました。保存先を確認してください。続けて他のファイルも選べます。';
+  } catch (e) {
+    status.textContent=e.name==='AbortError'?'キャンセルしました。写真や補正内容はそのままです。':'共有できませんでした。Safariで開くか「別タブで保存する」を使ってください。';
+  } finally { share.disabled=false; }
+});
+link.addEventListener('click',()=>{status.textContent='元のアプリはこのタブに残っています。別画面が開いたらSafariのタブ一覧から元のタブへ戻ってください。';});
+window.addEventListener('pagehide',()=>{if(url) URL.revokeObjectURL(url);});
+</script></html>'''
+
+def save_file(data,filename,mime):
+    components.html(save_html(data,filename,mime),height=260,scrolling=True)
 
 def rotate_page(page,turns):
     image,settings=correct(page['image'],auto_skew=False,quarter_turns=turns)
@@ -30,7 +80,7 @@ def render(project,save,replace_project):
     for pending,target in [('pending_step','simple_step'),('pending_page','simple_page')]:
         if pending in st.session_state:st.session_state[target]=st.session_state.pop(pending)
     st.title('写真を整えて、ChatGPTへ')
-    st.caption('v2.0.1 ・ 補正と出力は無料・APIキー不要')
+    st.caption('v2.0.2 ・ 補正と出力は無料・APIキー不要')
     st.radio('作業の順番',STEPS,horizontal=True,key='simple_step')
     step=st.session_state.simple_step
     pages=project['pages']
@@ -39,7 +89,8 @@ def render(project,save,replace_project):
         glossary=st.text_area('用語辞書（英語 → 日本語）',project['glossary'],key='simple_glossary_'+project['id'])
         if title!=project['title'] or glossary!=project['glossary']:
             project['title']=title;project['glossary']=glossary;save()
-        st.download_button('途中保存',pack(project),'photo_project.ponte',on_click='ignore')
+        if st.checkbox('途中保存のボタンを表示',key='show_checkpoint_save'):
+            save_file(pack(project),'photo_project.ponte','application/octet-stream')
         upload=st.file_uploader('途中保存から再開',type=['ponte'],key='simple_restore')
         if st.button('保存した作業を開く',disabled=upload is None):
             try:
@@ -144,13 +195,18 @@ def render(project,save,replace_project):
     result=st.session_state.get('simple_result')
     if result and result['revision']==st.session_state.rev:
         st.success('できました！ PDFと依頼文の2つをChatGPTへ添付してください。')
-        st.download_button('① 補正済みPDFを保存',result['pdf'],'corrected_pages.pdf','application/pdf',on_click='ignore',use_container_width=True)
-        st.download_button('② 翻訳の依頼文を保存',result['prompt'],'ChatGPT_prompt.txt','text/plain',on_click='ignore',use_container_width=True)
-        st.info('ChatGPTに2つを添付し「添付の依頼文に沿って対訳PDFを作ってください」と送信します。アプリに翻訳を貼り戻す操作は不要です。')
+        st.info('iPhoneでは「共有メニューから保存」→「ファイルに保存」を選びます。PDFと依頼文を1つずつ保存してください。ZIPは通常不要です。')
+        st.caption('別タブで保存する場合はSafariで開いてください。保存後はSafariのタブ一覧から元のアプリに戻れます。ホーム画面から開いた画面や他のアプリ内ブラウザでは、戻る操作が表示されない場合があります。')
+        choices={'① 補正済みPDF':('pdf','corrected_pages.pdf','application/pdf'),
+                 '② 翻訳の依頼文':('prompt','ChatGPT_prompt.txt','text/plain'),
+                 'PDF＋依頼文のZIP（任意）':('bundle','ChatGPT_handoff.zip','application/zip'),
+                 '写真のZIP（任意）':('images','corrected_images.zip','application/zip')}
+        choice=st.selectbox('保存するファイル',list(choices),key='save_file_choice')
+        data_key,filename,mime=choices[choice]
+        # Send only the selected file to the browser, not all large ZIPs at once.
+        save_file(result[data_key],filename,mime)
+        st.info('ChatGPTにPDFと依頼文を添付し「添付の依頼文に沿って対訳PDFと編集用Wordを作ってください」と送信します。アプリに翻訳を貼り戻す操作は不要です。')
         st.caption('続きの場合は前回の統合版PDF・用語辞書・作業記録も添付してください。原本の印刷ページ番号を使用します。')
-        with st.expander('まとめて保存／写真として渡す'):
-            st.download_button('PDF＋依頼文のZIP',result['bundle'],'ChatGPT_handoff.zip',on_click='ignore')
-            st.download_button('写真のZIP',result['images'],'corrected_images.zip',on_click='ignore')
-            st.caption('PDFの画像を読めない場合は、写真のZIPを展開してJPGをChatGPTへ添付してください。')
+        st.caption('PDFの画像を読めない場合は「写真のZIP」を保存・展開してJPGをChatGPTへ添付してください。')
         st.divider()
         back_buttons('bottom')
