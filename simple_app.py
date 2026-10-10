@@ -66,13 +66,17 @@ def rotate_page(page,turns):
     image,settings=correct(page['image'],auto_skew=False,quarter_turns=turns)
     apply_correction(page,image,settings);page['photo_reviewed']=False
 
-def prepare(page,crop=True):
-    image,note=orient(page['image'])
+def prepare(page,crop=False,auto_curve=True,auto_light=True):
+    image,note=orient(page.get('original_image',page['image']))
     quad,_=detect_page(image) if crop else (None,'')
     if quad==FULL_QUAD:quad=None
-    image,settings=correct(image,quad=quad)
+    try:
+        image,settings=correct(image,quad=quad,preserve_frame=True,auto_curve=auto_curve,auto_light=auto_light)
+    except ValueError:
+        image,settings=correct(image,auto_curve=auto_curve,auto_light=auto_light)
+        note+=' 四隅の変形が大きいため、四隅補正は見送りました。'
     apply_correction(page,image,settings);page['photo_reviewed']=False
-    return note
+    return note+' '+settings.get('curve_note','')
 
 def render(project,save,replace_project):
     def go(n):st.session_state.pending_step=STEPS[n]
@@ -80,7 +84,7 @@ def render(project,save,replace_project):
     for pending,target in [('pending_step','simple_step'),('pending_page','simple_page')]:
         if pending in st.session_state:st.session_state[target]=st.session_state.pop(pending)
     st.title('写真を整えて、ChatGPTへ')
-    st.caption('v2.0.2 ・ 補正と出力は無料・APIキー不要')
+    st.caption('v2.1.0 ・ 端を保持・明るさ調整・自動湾曲補正')
     st.radio('作業の順番',STEPS,horizontal=True,key='simple_step')
     step=st.session_state.simple_step
     pages=project['pages']
@@ -124,13 +128,18 @@ def render(project,save,replace_project):
         st.info('まず写真・PDFを入れてください。');st.button('写真を入れる',on_click=go,args=(0,));return
     if step==STEPS[1]:
         st.subheader('文字が上向きで、端まで読めるか確認')
-        crop=st.checkbox('紙の四隅も自動で補正する',value=True)
+        st.caption('自動補正は取り込み時の写真からやり直します。端を切り取らず、文字の欠けを防ぎます。')
+        crop=st.checkbox('四隅の遠近も補正する（画像全体を保持）',value=False)
+        auto_curve=st.checkbox('本文の湾曲を自動補正する',value=True)
+        auto_light=st.checkbox('暗い写真を自動で明るくする',value=True)
+        redo=st.checkbox('補正済みの写真も原本からまとめてやり直す',value=False)
+        if redo:st.caption('手動で調整した向き・湾曲・明るさもやり直します。元の写真は保持します。')
         if st.button('向き・傾きをまとめて自動補正',type='primary',use_container_width=True):
-            targets=[p for p in pages if not p.get('correction') and not p.get('photo_reviewed')]
+            targets=[p for p in pages if redo or (not p.get('correction') and not p.get('photo_reviewed'))]
             bar=st.progress(0)
             for i,p in enumerate(targets):
                 try:
-                    note=prepare(p,crop);st.session_state['orient_'+p['id']]=note;save()
+                    note=prepare(p,crop,auto_curve,auto_light);st.session_state['orient_'+p['id']]=note;save()
                 except Exception as e:st.session_state['orient_'+p['id']]='補正できませんでした：'+str(e)
                 bar.progress((i+1)/len(targets))
             if not targets:st.info('未補正の写真はありません。やり直す場合は「取り込み時に戻す」を押してください。')
@@ -139,6 +148,16 @@ def render(project,save,replace_project):
         idx=st.selectbox('確認する写真',range(len(pages)),format_func=lambda i:f'{i+1}｜{pages[i]["source"]}'+(' ✓' if pages[i].get('photo_reviewed') else ''),key='simple_page')
         page=pages[idx];pid=page['id'];sig=hashlib.sha256(page['image']).hexdigest()[:12]
         st.image(page['image'],use_container_width=True)
+        with st.expander('取り込み時の写真と比較'):
+            st.image(page.get('original_image',page['image']),caption='取り込み時の写真：文字の欠け・曲がりを比較してください。',use_container_width=True)
+        with st.expander('明るさ・コントラストを調整'):
+            light=st.slider('明るさ',0.6,1.6,1.0,0.05,key='light_'+pid+'_'+sig)
+            contrast=st.slider('コントラスト',0.7,1.4,1.0,0.05,key='contrast_'+pid+'_'+sig)
+            if light!=1. or contrast!=1.:
+                lit,lit_settings=correct(page['image'],auto_skew=False,brightness=light,contrast=contrast)
+                st.image(lit,caption='明るさのプレビュー',use_container_width=True)
+                if st.button('この明るさを使う'):
+                    apply_correction(page,lit,lit_settings);page['photo_reviewed']=False;save();st.rerun()
         if st.session_state.get('orient_'+pid):st.caption(st.session_state['orient_'+pid])
         a,b,c=st.columns(3)
         for col,label,turn in [(a,'↶ 左回転',1),(b,'↷ 右回転',-1),(c,'上下反転',2)]:
@@ -147,11 +166,12 @@ def render(project,save,replace_project):
         with st.expander('湾曲・切り取りを調整する'):
             mode=st.radio('調整する内容',['湾曲を伸ばす','紙の四隅を合わせる'],horizontal=True)
             quad=mode=='紙の四隅を合わせる'
+            trim=st.checkbox('枠の外を切り取る（文字が欠けないか確認）',value=False) if quad else False
             points=FULL_QUAD if quad else [[x,y] for y in (20.,50.,80.) for x in (0.,25.,50.,75.,100.)]
             identity=f'{pid}_{sig}_{quad}'
             result=editor(image='data:image/jpeg;base64,'+base64.b64encode(page['image']).decode(),points=points,mode='quad' if quad else 'curve',identity=identity,key=identity,default=points)
             try:
-                settings={'quad':result} if quad else {'mesh_lines':[[result[i*5+j][1] for j in range(5)] for i in range(3)]}
+                settings={'quad':result,'preserve_frame':not trim} if quad else {'mesh_lines':[[result[i*5+j][1] for j in range(5)] for i in range(3)]}
                 preview,meta=correct(page['image'],auto_skew=False,**settings)
                 st.image(preview,caption='この仕上がりで保存します',use_container_width=True)
                 if st.button('この調整を使う',type='primary'):
@@ -163,7 +183,7 @@ def render(project,save,replace_project):
             restore_original(page);st.session_state.pop('orient_'+pid,None);save();st.rerun()
         if b.button('この写真だけ自動補正'):
             try:
-                st.session_state['orient_'+pid]=prepare(page,crop);save();st.rerun()
+                st.session_state['orient_'+pid]=prepare(page,crop,auto_curve,auto_light);save();st.rerun()
             except Exception as e:st.error('補正できませんでした：'+str(e))
         a,b=st.columns(2)
         if a.button('順番を前へ',disabled=idx==0):

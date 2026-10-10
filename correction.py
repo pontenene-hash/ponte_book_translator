@@ -44,7 +44,7 @@ def detect_page(data):
     q=order_quad(poly)/np.array([small.shape[1]-1,small.shape[0]-1])*100
     return np.clip(q,0,100).round(1).tolist(),'四隅の候補です。緑の枠がページの外周に合うか確認してください。'
 
-def perspective(rgb,quad):
+def perspective(rgb,quad,preserve_frame=False):
     q=np.asarray(quad,dtype=np.float32)
     if q.shape!=(4,2) or not np.isfinite(q).all() or np.any(q<0) or np.any(q>100):
         raise ValueError('四隅は0〜100%で指定してください。')
@@ -59,7 +59,60 @@ def perspective(rgb,quad):
     width,height=int(round(tw))+1,int(round(th))+1
     dst=np.float32([[0,0],[width-1,0],[width-1,height-1],[0,height-1]])
     matrix=cv2.getPerspectiveTransform(src.astype(np.float32),dst)
+    if preserve_frame:
+        corners=np.float32([[[0,0],[w-1,0],[w-1,h-1],[0,h-1]]])
+        projected=cv2.perspectiveTransform(corners,matrix)[0]
+        den=np.c_[corners[0],np.ones(4)]@matrix[2]
+        if not np.isfinite(projected).all() or np.min(den)*np.max(den)<=0:
+            raise ValueError('安全に全体を保持できない四隅です。切り取りなしで補正してください。')
+        lo=np.floor(projected.min(axis=0))-8;hi=np.ceil(projected.max(axis=0))+8
+        width,height=(hi-lo+1).astype(int)
+        if width*height>12_000_000 or max(width,height)>6000:
+            raise ValueError('変形が大きいため四隅の補正を見送りました。')
+        matrix=np.array([[1,0,-lo[0]],[0,1,-lo[1]],[0,0,1]])@matrix
     return cv2.warpPerspective(rgb,matrix,(width,height),flags=cv2.INTER_CUBIC,borderValue=(255,255,255))
+
+def estimate_curvature(rgb):
+    """Conservative common quadratic text-line bend; reject sparse/mixed layouts."""
+    h0,w0=rgb.shape[:2];scale=min(1.,1400/max(h0,w0))
+    gray=cv2.cvtColor(cv2.resize(rgb,None,fx=scale,fy=scale),cv2.COLOR_RGB2GRAY)
+    h,w=gray.shape
+    ink=cv2.adaptiveThreshold(gray,255,cv2.ADAPTIVE_THRESH_GAUSSIAN_C,cv2.THRESH_BINARY_INV,31,12)
+    joined=cv2.morphologyEx(ink,cv2.MORPH_CLOSE,np.ones((1,max(9,int(w*.035))),np.uint8))
+    n,labels,stats,_=cv2.connectedComponentsWithStats(joined)
+    fits=[]
+    for i in range(1,n):
+        x,y,bw,bh,area=stats[i]
+        if bw<w*.5 or bh>h*.10 or bh<4 or y<h*.04 or y+bh>h*.96:continue
+        ys,xs=np.nonzero((labels[y:y+bh,x:x+bw]==i)&(ink[y:y+bh,x:x+bw]>0))
+        if len(xs)<100:continue
+        samples=[]
+        for start in np.linspace(x,x+bw,25)[:-1]:
+            take=(xs+x>=start)&(xs+x<start+bw/24)
+            if take.sum()>5:samples.append(((start+bw/48)/w-.5,float(np.median(ys[take]+y))))
+        if len(samples)<18:continue
+        xx,yy=np.asarray(samples).T
+        coeff=np.polyfit(xx,yy,2);res=np.median(np.abs(np.polyval(coeff,xx)-yy))
+        # Straight rules and illustrations are not sufficient text evidence.
+        cc=cv2.connectedComponentsWithStats(ink[y:y+bh,x:x+bw])[2][1:]
+        chars=sum(2<=a[2]<=w*.04 and 3<=a[3]<=h*.04 for a in cc)
+        if chars<15 or res>max(1.5,bh*.18):continue
+        fits.append((coeff[0],float(np.median(yy))))
+    if len(fits)<5:return None,'湾曲：本文の行を十分に検出できず、自動補正を見送りました。'
+    values,rows=np.asarray(fits).T
+    a=float(np.median(values));mad=float(np.median(np.abs(values-a)))
+    if np.ptp(rows)<h*.30 or mad>max(3,abs(a)*.30) or abs(a)*.25<2 or abs(a)*.25>h*.035:
+        return None,'湾曲：行の曲がりが不明確／不均一なため、自動補正を見送りました。'
+    offsets=a*((np.linspace(0,1,5)-.5)**2-.125)/h*100
+    grid=np.array([20.,50.,80.])[:,None]+offsets[None,:]
+    return grid.tolist(),f'湾曲：{len(fits)}本の行から緩やかな曲がりを補正しました。仕上がりを確認してください。'
+
+def brighten_paper(rgb):
+    # Gentle global exposure lift; preserve colour and avoid aggressive whitening.
+    gray=cv2.cvtColor(rgb,cv2.COLOR_RGB2GRAY)
+    white=float(np.percentile(gray,85))
+    gain=min(1.30,max(1.,235/max(white,1)))
+    return np.clip(rgb.astype(np.float32)*gain,0,255).astype(np.uint8)
 
 def detect_skew(rgb):
     gray=cv2.cvtColor(rgb,cv2.COLOR_RGB2GRAY)
@@ -86,19 +139,22 @@ def unbend(rgb,top=0.,bottom=0.):
     my=v*(h-1)+((1-v)*top+v*bottom)/100*(h-1)*curve[None,:]
     return cv2.remap(rgb,mx,my.astype(np.float32),cv2.INTER_CUBIC,borderMode=cv2.BORDER_CONSTANT,borderValue=(255,255,255))
 
-def correct(data,quad=None,auto_skew=True,angle=0.,quarter_turns=0,top=0.,bottom=0.,brightness=1.,contrast=1.,mesh_lines=None):
+def correct(data,quad=None,auto_skew=True,angle=0.,quarter_turns=0,top=0.,bottom=0.,brightness=1.,contrast=1.,mesh_lines=None,preserve_frame=False,auto_curve=False,auto_light=False):
     rgb=decode(data)
-    if quad is not None: rgb=perspective(rgb,quad)
+    if quad is not None: rgb=perspective(rgb,quad,preserve_frame=preserve_frame)
     detected=detect_skew(rgb) if auto_skew else 0.
     im=Image.fromarray(rgb)
     total=detected+float(angle)+90*int(quarter_turns)
     if total:im=im.rotate(total,resample=Image.Resampling.BICUBIC,expand=True,fillcolor='white')
-    rgb=mesh_unbend(np.asarray(im),mesh_lines) if mesh_lines is not None else unbend(np.asarray(im),top,bottom)
+    curve_note='';rgb=np.asarray(im)
+    if auto_curve and mesh_lines is None:mesh_lines,curve_note=estimate_curvature(rgb)
+    rgb=mesh_unbend(rgb,mesh_lines) if mesh_lines is not None else unbend(rgb,top,bottom)
+    if auto_light:rgb=brighten_paper(rgb)
     im=Image.fromarray(rgb)
     im=ImageEnhance.Brightness(im).enhance(brightness)
     im=ImageEnhance.Contrast(im).enhance(contrast)
     im.thumbnail((3200,3200))
-    return encode(np.asarray(im)),{'detected_angle':round(detected,2),'angle':angle,'quarter_turns':quarter_turns,'top':top,'bottom':bottom,'brightness':brightness,'contrast':contrast,'quad':quad,'mesh_lines':mesh_lines}
+    return encode(np.asarray(im)),{'detected_angle':round(detected,2),'angle':angle,'quarter_turns':quarter_turns,'top':top,'bottom':bottom,'brightness':brightness,'contrast':contrast,'quad':quad,'mesh_lines':mesh_lines,'preserve_frame':preserve_frame,'auto_curve':auto_curve,'auto_light':auto_light,'curve_note':curve_note}
 
 def overlay(data,quad):
     rgb=decode(data);h,w=rgb.shape[:2]
