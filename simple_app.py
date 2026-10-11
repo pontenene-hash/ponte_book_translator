@@ -84,7 +84,7 @@ def render(project,save,replace_project):
     for pending,target in [('pending_step','simple_step'),('pending_page','simple_page')]:
         if pending in st.session_state:st.session_state[target]=st.session_state.pop(pending)
     st.title('写真を整えて、ChatGPTへ')
-    st.caption('v2.1.0 ・ 端を保持・明るさ調整・自動湾曲補正')
+    st.caption('v2.1.1 ・ 端を保持・明るさ調整・自動湾曲補正')
     st.radio('作業の順番',STEPS,horizontal=True,key='simple_step')
     step=st.session_state.simple_step
     pages=project['pages']
@@ -148,6 +148,12 @@ def render(project,save,replace_project):
         idx=st.selectbox('確認する写真',range(len(pages)),format_func=lambda i:f'{i+1}｜{pages[i]["source"]}'+(' ✓' if pages[i].get('photo_reviewed') else ''),key='simple_page')
         page=pages[idx];pid=page['id'];sig=hashlib.sha256(page['image']).hexdigest()[:12]
         st.image(page['image'],use_container_width=True)
+        def accept_photo():
+            page['photo_reviewed']=True;save()
+            remaining=[i for i in range(idx+1,len(pages)) if not pages[i].get('photo_reviewed')]+[i for i in range(idx) if not pages[i].get('photo_reviewed')]
+            if remaining:move(remaining[0])
+            else:go(2)
+        st.button('この写真でOK → 次へ',key='accept_photo_preview',on_click=accept_photo,type='primary',use_container_width=True)
         with st.expander('取り込み時の写真と比較'):
             st.image(page.get('original_image',page['image']),caption='取り込み時の写真：文字の欠け・曲がりを比較してください。',use_container_width=True)
         with st.expander('明るさ・コントラストを調整'):
@@ -190,12 +196,7 @@ def render(project,save,replace_project):
             pages[idx-1],pages[idx]=pages[idx],pages[idx-1];save();move(idx-1);st.rerun()
         if b.button('順番を後ろへ',disabled=idx==len(pages)-1):
             pages[idx+1],pages[idx]=pages[idx],pages[idx+1];save();move(idx+1);st.rerun()
-        if st.button('この写真でOK → 次へ',type='primary',use_container_width=True):
-            page['photo_reviewed']=True;save()
-            remaining=[i for i in range(idx+1,len(pages)) if not pages[i].get('photo_reviewed')]+[i for i in range(idx) if not pages[i].get('photo_reviewed')]
-            if remaining:move(remaining[0])
-            else:go(2)
-            st.rerun()
+        st.button('この写真でOK → 次へ',key='accept_photo_bottom',on_click=accept_photo,type='primary',use_container_width=True)
         st.button('保存画面へ →',on_click=go,args=(2,),use_container_width=True)
         return
     def back_buttons(position):
